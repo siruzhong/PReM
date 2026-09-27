@@ -1,0 +1,38 @@
+__pycache__/
+*.py[cod]
+
+.venv/
+.venv*/
+.env
+.tmp-streamchat
+.cache-streamchat
+
+# macOS archive and Finder metadata
+__MACOSX/
+.DS_Store
+._*
+
+ckpt/
+checkpoints/
+outputs/
+logs/
+wandb/
+
+data/
+!/scripts/data/
+data.tos-link
+
+docker/*.tar.gz
+docker/prem-conda-env.tar.gz.bak
+
+# Local paper workspace (separate Git repository)
+/ICLR26/
+
+# Official third-party baseline checkouts (pinned in docs/baseline_sources.md)
+/external/baselines/
+
+*.log
+
+.omo/
+
+paper/
