@@ -7,6 +7,7 @@ Optional question-conditioned evidence prediction can be enabled with
 from __future__ import annotations
 
 import argparse
+import hashlib
 import importlib.util
 import json
 import os
@@ -15,6 +16,8 @@ import subprocess
 import sys
 import time
 import traceback
+from contextlib import nullcontext
+from datetime import timedelta
 from pathlib import Path
 
 import torch
@@ -498,6 +501,7 @@ def main():
     )
     ap.add_argument("--model_path", default=None)
     ap.add_argument("--llava_data_file", default="data/llava-video-178k/trainset_9k.json")
+    ap.add_argument("--data_protocol", choices=("legacy", "rebuttal_decontaminated_v1"), default="legacy")
     ap.add_argument("--llava_video_root", default="data/llava-video-178k/frames")
     ap.add_argument("--fps", type=float, default=1.0)
     ap.add_argument("--filter_missing_media", action="store_true")
@@ -538,6 +542,16 @@ def main():
     ap.add_argument("--disable_evidence_gate_write", action="store_true", help="Protected write ablation: set write evidence_gate=1")
     ap.add_argument("--uniform_write_route", action="store_true", help="Protected write ablation: set write route=1/num_slots")
     ap.add_argument("--seed", type=int, default=13)
+    ap.add_argument("--writer_variant", choices=("prem", "temporal_mean", "ema"), default="prem")
+    ap.add_argument("--ema_decay", type=float, default=0.98)
+    ap.add_argument("--offload_answer_activations", action="store_true")
+    ap.add_argument("--offload_frozen_decoder_for_vision", action="store_true")
+    ap.add_argument("--gpu_answer_saved_gib", type=int, default=0,
+                    help="CUDA budget for contiguous saved activations before CPU offload")
+    ap.add_argument("--gpu_vision_min_free_gib", type=int, default=0,
+                    help="Keep the frozen decoder on CUDA during vision encoding above this free-memory threshold")
+    ap.add_argument("--distributed_timeout_seconds", type=int, default=600,
+                    help="Collective timeout; increase for long samples on shared GPUs")
     ap.add_argument("--log_every", type=int, default=10)
     ap.add_argument("--save_every", type=int, default=200, help="Write a resumable latest checkpoint every N steps")
     ap.add_argument("--init_ckpt", default=None, help="Initialize memory weights from a checkpoint without resuming state")
@@ -551,6 +565,15 @@ def main():
     ap.add_argument("--no_skip_bad_samples", dest="skip_bad_samples", action="store_false")
     ap.add_argument("--device", default="auto")
     args = ap.parse_args()
+
+    if args.distributed_timeout_seconds <= 0:
+        ap.error("--distributed_timeout_seconds must be positive")
+    if args.gpu_answer_saved_gib < 0 or args.gpu_vision_min_free_gib < 0:
+        ap.error("CUDA memory budgets must be nonnegative")
+    if args.gpu_answer_saved_gib and not args.offload_answer_activations:
+        ap.error("--gpu_answer_saved_gib requires --offload_answer_activations")
+    if args.gpu_vision_min_free_gib and not args.offload_frozen_decoder_for_vision:
+        ap.error("--gpu_vision_min_free_gib requires --offload_frozen_decoder_for_vision")
 
     if args.model_path is None:
         default_models = {
@@ -590,7 +613,9 @@ def main():
     local_rank = int(os.environ.get("LOCAL_RANK", "0"))
     world_size = int(os.environ.get("WORLD_SIZE", "1"))
     if distributed:
-        dist.init_process_group(backend="nccl")
+        dist.init_process_group(
+            backend="nccl", timeout=timedelta(seconds=args.distributed_timeout_seconds)
+        )
         torch.cuda.set_device(local_rank)
     is_main = rank == 0
 
@@ -663,6 +688,16 @@ def main():
         uniform_write_route=args.uniform_write_route,
     )
     mem.to(device=model.device, dtype=torch.float32)
+    if args.writer_variant != "prem":
+        from models.prem_writer_controls import install_pooled_writer
+
+        mem = install_pooled_writer(model, args.writer_variant, args.ema_decay)
+    if args.offload_frozen_decoder_for_vision:
+        from models.training_memory import offload_frozen_decoder_for_vision
+
+        offload_frozen_decoder_for_vision(model, args.gpu_vision_min_free_gib)
+    if args.offload_answer_activations:
+        from models.training_memory import save_answer_activations
     for p in mem.parameters():
         p.requires_grad_(True)
     model.train()
@@ -672,10 +707,14 @@ def main():
     n_frozen = sum(p.numel() for p in model.parameters() if not p.requires_grad)
     if is_main:
         print(
-            f"[dist] distributed={distributed} rank={rank}/{world_size} local_rank={local_rank}",
+            f"[dist] distributed={distributed} rank={rank}/{world_size} local_rank={local_rank} "
+            f"timeout_seconds={args.distributed_timeout_seconds}",
             flush=True,
         )
         print(f"[params] prem_trainable={n_train:,} frozen_backbone={n_frozen:,}", flush=True)
+        if args.gpu_answer_saved_gib or args.gpu_vision_min_free_gib:
+            print(f"[memory] gpu_answer_saved_gib={args.gpu_answer_saved_gib} "
+                  f"gpu_vision_min_free_gib={args.gpu_vision_min_free_gib}", flush=True)
 
     media_filter_root = Path(args.llava_video_root) if args.filter_missing_media else None
     train_rows, dev_rows = load_llava_split(
@@ -689,6 +728,11 @@ def main():
     source_train_sample_count = len(train_rows)
     source_dev_sample_count = len(dev_rows)
     source_train_qa_count = count_llava_qa_pairs(train_rows)
+    train_manifest_sha256 = hashlib.sha256(Path(args.llava_data_file).read_bytes()).hexdigest()
+    if args.data_protocol == "rebuttal_decontaminated_v1" and (
+        source_train_sample_count != 8953 or source_train_qa_count != 17849 or args.dev_ratio != 0
+    ):
+        raise ValueError("The decontaminated protocol requires the verified 8,953-row / 17,849-QA split")
     source_dev_qa_count = count_llava_qa_pairs(dev_rows)
     qa_pairs_flattened = True
     data_semantics = "unified_bounded_visual_memory_qa_v3"
@@ -715,6 +759,8 @@ def main():
             json.dump(
                 {
                     "llava_data_file": args.llava_data_file,
+                    "train_manifest_sha256": train_manifest_sha256,
+                    "data_protocol": args.data_protocol,
                     "llava_video_root": args.llava_video_root,
                     "fps": args.fps,
                     "filter_missing_media": args.filter_missing_media,
@@ -777,7 +823,18 @@ def main():
             "router_gamma": args.router_gamma,
             "pred_weight": args.pred_weight,
             "pred_tokens": args.pred_tokens,
-            "writer_mode": "temporal_mean_per_step",
+            "writer_mode": (
+                "temporal_mean_per_step" if args.writer_variant == "prem" else "pooled_normalized_feature"
+            ),
+            "writer_variant": args.writer_variant,
+            "ema_decay": args.ema_decay if args.writer_variant == "ema" else None,
+            "pooling_state_semantics": (
+                "normalized_feature_and_observation_count" if args.writer_variant != "prem" else None
+            ),
+            "offload_answer_activations": args.offload_answer_activations,
+            "offload_frozen_decoder_for_vision": args.offload_frozen_decoder_for_vision,
+            "gpu_answer_saved_gib": args.gpu_answer_saved_gib,
+            "gpu_vision_min_free_gib": args.gpu_vision_min_free_gib,
             "disable_anti_distractor": args.disable_anti_distractor,
             "disable_novelty": args.disable_novelty,
             "disable_stability": args.disable_stability,
@@ -809,9 +866,16 @@ def main():
             "model_type": args.model_type,
             "model_path": args.model_path,
             "seed": args.seed,
+            "lr": args.lr,
+            "epochs": args.epochs,
+            "world_size": world_size,
+            "global_batch_size": world_size,
+            "distributed_timeout_seconds": args.distributed_timeout_seconds,
             "warmup_ratio": args.warmup_ratio,
             "warmup_steps": warmup_steps,
             "llava_data_file": args.llava_data_file,
+            "train_manifest_sha256": train_manifest_sha256,
+            "data_protocol": args.data_protocol,
             "llava_video_root": args.llava_video_root,
             "train_wall_seconds": float(time.time() - t0),
             "train_peak_gpu_memory_allocated_bytes": (
@@ -828,6 +892,14 @@ def main():
         return checkpoint
 
     def validate_training_checkpoint(checkpoint: dict, path: Path):
+        if checkpoint.get("data_protocol", "legacy") != args.data_protocol:
+            raise ValueError("Training checkpoint data protocol does not match")
+        if checkpoint.get("train_manifest_sha256", train_manifest_sha256) != train_manifest_sha256:
+            raise ValueError("Training checkpoint manifest hash does not match")
+        if checkpoint.get("writer_variant", "prem") != args.writer_variant:
+            raise ValueError("Training checkpoint writer does not match this run")
+        if args.writer_variant == "ema" and checkpoint.get("ema_decay") != args.ema_decay:
+            raise ValueError("Training checkpoint EMA decay does not match this run")
         if checkpoint.get("data_semantics") != data_semantics:
             raise ValueError(f"Incompatible training checkpoint semantics: {path}")
         if checkpoint.get("qa_objective") != "single_ce":
@@ -879,7 +951,16 @@ def main():
         if resume_path.exists():
             resume = torch.load(resume_path, map_location="cpu")
             validate_training_checkpoint(resume, resume_path)
+            formal_resume = args.data_protocol == "rebuttal_decontaminated_v1"
+            if formal_resume:
+                if any(int(resume.get(key, -1)) != world_size
+                       for key in ("world_size", "global_batch_size")):
+                    raise ValueError("Formal resume requires the original GPU count and global batch")
+                if "optimizer_state_dict" not in resume:
+                    raise ValueError("Formal resume requires optimizer state")
             missing, unexpected = mem.load_state_dict(resume.get("prem_state_dict", resume), strict=False)
+            if formal_resume and (missing or unexpected):
+                raise ValueError(f"Formal resume state mismatch: missing={missing}, unexpected={unexpected}")
             if "optimizer_state_dict" in resume:
                 try:
                     opt.load_state_dict(resume["optimizer_state_dict"])
@@ -888,6 +969,8 @@ def main():
                             if torch.is_tensor(value):
                                 state[key] = value.to(device=device)
                 except ValueError as exc:
+                    if formal_resume:
+                        raise ValueError("Formal resume could not restore optimizer state") from exc
                     print(f"[resume] optimizer state skipped: {exc}", flush=True)
             step = int(resume.get("train_steps", 0))
             skipped = int(resume.get("skipped", 0))
@@ -1097,7 +1180,12 @@ def main():
                             model_inputs["video_grid_thw"] = answer_inputs["video_grid_thw"]
                         if args.model_type == "qwen2_5vl":
                             model_inputs["second_per_grid_ts"] = answer_inputs.get("second_per_grid_ts")
-                    out = model(**model_inputs)
+                    activation_context = (
+                        save_answer_activations(device, args.gpu_answer_saved_gib)
+                        if args.offload_answer_activations else nullcontext()
+                    )
+                    with activation_context:
+                        out = model(**model_inputs)
                     qa_loss = out.loss
                     answer_stats = dict(model.prem_last_stats or {})
                     router_balance_loss = float(answer_stats.get("router_balance_loss", 0.0))
@@ -1201,6 +1289,7 @@ def main():
                     f"active={active_count:.0f}/{world_size} supervised_qa={global_gradient_weight:.0f} "
                     f"skipped_rank0={skipped} "
                     f"writer={stats.get('stream_writer_mode')} "
+                    f"write_steps={stats.get('stream_num_temporal_steps')} "
                     f"write_gate={stats.get('mean_write_gate')} "
                     f"memory_norm={stats.get('mean_memory_norm')} "
                     f"query_steer={stats.get('mean_query_steer_norm')} "

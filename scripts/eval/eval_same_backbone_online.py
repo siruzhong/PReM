@@ -57,7 +57,12 @@ from scripts.eval.eval_prem_online import (
     write_result_files,
 )
 from scripts.eval.inference_mcq_vqa import get_sample_media_name, normalize_mcq_sample
-from scripts.eval.prem_checkpoint import artifact_identity, make_eval_signature
+from scripts.eval.input_alignment import decoder_input_record, file_sha256
+from scripts.eval.prem_checkpoint import (
+    artifact_identity,
+    make_eval_signature,
+    normalize_prem_checkpoint,
+)
 
 
 METHOD_LABELS = {
@@ -88,7 +93,9 @@ def load_base_or_lora(args):
     trainable_parameters = 0
     checkpoint = None
     if args.method == "lora":
-        checkpoint = torch.load(args.baseline_ckpt, map_location="cpu", weights_only=False)
+        checkpoint = normalize_prem_checkpoint(
+            torch.load(args.baseline_ckpt, map_location="cpu", weights_only=False)
+        )
         validate_control_checkpoint(checkpoint, args, "lora")
         from peft import get_peft_model, set_peft_model_state_dict
 
@@ -193,8 +200,11 @@ def validate_control_checkpoint(checkpoint: dict, args, method: str) -> None:
 
 
 def load_token_readout(args):
-    checkpoint = torch.load(args.baseline_ckpt, map_location="cpu", weights_only=False)
+    checkpoint = normalize_prem_checkpoint(
+        torch.load(args.baseline_ckpt, map_location="cpu", weights_only=False)
+    )
     validate_control_checkpoint(checkpoint, args, "token_readout")
+    args.token_readout_position = checkpoint.get("token_readout_position", "answer")
     if checkpoint.get("read_interface") != "in_sequence_tokens":
         raise ValueError("Token-readout checkpoint has the wrong read interface")
     model = load_prem_wrapper(args)
@@ -231,7 +241,9 @@ def load_prem(args):
     model = load_prem_wrapper(args)
     args.visual_buffer_frames = args.buffer_frames
     cfg = load_prem_memory(model, args.baseline_ckpt, args)
-    checkpoint = torch.load(args.baseline_ckpt, map_location="cpu", weights_only=False)
+    checkpoint = normalize_prem_checkpoint(
+        torch.load(args.baseline_ckpt, map_location="cpu", weights_only=False)
+    )
     trainable_parameters = sum(
         int(value.numel()) for value in checkpoint["prem_state_dict"].values()
     )
@@ -297,6 +309,7 @@ def answer_reservoir(model, processor, question: str, state: dict, args):
         args,
         is_mcq=True,
     )
+    alignment = decoder_input_record(inputs, state)
     model_inputs = {
         key: value.to(model.device) if hasattr(value, "to") else value
         for key, value in inputs.items()
@@ -317,6 +330,7 @@ def answer_reservoir(model, processor, question: str, state: dict, args):
             (grid.to(dtype=torch.long).prod(dim=1) // (merge_size**2)).sum().item()
         )
     return choose_option(output.logits, processor, question), {
+        **alignment,
         "decoder_prompt_tokens": int(attention_mask.sum().item()),
         "auxiliary_prompt_tokens": 0,
         "visual_tokens": visual_tokens,
@@ -333,6 +347,7 @@ def answer_token_readout(model, processor, question: str, state: dict, args):
         args,
         is_mcq=True,
     )
+    alignment = decoder_input_record(inputs, state)
     model_inputs = {
         key: value.to(model.device) if hasattr(value, "to") else value
         for key, value in inputs.items()
@@ -346,9 +361,10 @@ def answer_token_readout(model, processor, question: str, state: dict, args):
             model_inputs,
             state,
             prompt_length,
+            position=getattr(args, "token_readout_position", "answer"),
         )
         output = model(**expanded, use_cache=False, logits_to_keep=1, return_dict=True)
-    return choose_option(output.logits, processor, question), stats
+    return choose_option(output.logits, processor, question), {**stats, **alignment}
 
 
 def answer_prem(model, processor, question: str, state: dict, cfg: dict, args):
@@ -360,6 +376,7 @@ def answer_prem(model, processor, question: str, state: dict, cfg: dict, args):
         args,
         is_mcq=True,
     )
+    alignment = decoder_input_record(inputs, state)
     model_inputs = {
         key: value.to(model.device) if hasattr(value, "to") else value
         for key, value in inputs.items()
@@ -389,6 +406,7 @@ def answer_prem(model, processor, question: str, state: dict, cfg: dict, args):
             **model_inputs,
         )
     return choose_option(output.logits, processor, question), {
+        **alignment,
         "decoder_prompt_tokens": int(attention_mask.sum().item()),
         "auxiliary_prompt_tokens": 0,
         "memory_state_bytes": recurrent_state_bytes(state),
@@ -753,6 +771,16 @@ def make_signature(args, checkpoint, trainable_parameters: int) -> str:
         "dataset": args.dataset,
         "model": artifact_identity(args.model_path),
         "checkpoint": artifact_identity(args.baseline_ckpt),
+        "checkpoint_sha256": file_sha256(args.baseline_ckpt) if args.baseline_ckpt else None,
+        "checkpoint_config": {
+            key: checkpoint.get(key) for key in (
+                "num_slots", "mem_dim", "prem_layer_groups", "max_frames",
+                "max_memory_tokens", "alpha", "learned_alpha", "pred_weight",
+                "pred_tokens", "seed", "llava_data_file", "data_semantics",
+            )
+        } if checkpoint else None,
+        "prem_alpha_run": args.prem_alpha if args.method == "prem" else None,
+        "decoder_input_digest_version": 1,
         "max_frames": args.max_frames,
         "buffer_frames": args.buffer_frames,
         "fps": args.fps,

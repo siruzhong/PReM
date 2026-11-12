@@ -44,7 +44,12 @@ from scripts.eval.inference_mcq_vqa import (
     resolve_video_source,
 )
 from scripts.eval.data_io import load_records
-from scripts.eval.prem_checkpoint import artifact_identity, make_eval_signature, validate_prem_checkpoint
+from scripts.eval.prem_checkpoint import (
+    artifact_identity,
+    make_eval_signature,
+    normalize_prem_checkpoint,
+    validate_prem_checkpoint,
+)
 from models.prem_qwen2_5_vl_model import PReMQwen2_5_VLForConditionalGeneration
 from models.prem_qwen2vl_model import PReMQwen2VLForConditionalGeneration
 from models.prem_qwen3_vl_model import PReMQwen3VLForConditionalGeneration
@@ -95,7 +100,7 @@ def efficiency_stats(enabled: bool) -> dict[str, int]:
 
 
 def load_prem_memory(model, ckpt_path: str, args):
-    ckpt = torch.load(ckpt_path, map_location="cpu")
+    ckpt = normalize_prem_checkpoint(torch.load(ckpt_path, map_location="cpu", weights_only=False))
     validate_prem_checkpoint(ckpt)
     checkpoint_modulation = ckpt["prem_modulation"]
     if args.prem_modulation != checkpoint_modulation:

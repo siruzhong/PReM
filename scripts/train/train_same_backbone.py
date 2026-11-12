@@ -9,6 +9,7 @@ same LLaVA-Video split, writer horizon, and decoder frame budget used by PReM.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import importlib.util
 import json
 import math
@@ -17,6 +18,8 @@ import random
 import sys
 import time
 import traceback
+from contextlib import nullcontext
+from datetime import timedelta
 from pathlib import Path
 
 import torch
@@ -146,6 +149,12 @@ def load_models(args, device: str):
     return model, memory, processor, attn, actual
 
 
+# Pinned host buffers are cached by PyTorch and grow over long runs; set
+# PREM_OFFLOAD_PIN_MEMORY=0 to offload activations to pageable memory instead.
+# The saved tensors and gradients are identical either way.
+OFFLOAD_PIN_MEMORY = os.environ.get("PREM_OFFLOAD_PIN_MEMORY", "1") != "0"
+
+
 def load_resume(args, model, optimizer, device: str) -> tuple[int, int, int, list[float]]:
     if not args.resume:
         return 0, 0, 0, []
@@ -155,8 +164,14 @@ def load_resume(args, model, optimizer, device: str) -> tuple[int, int, int, lis
         print(f"[resume] no checkpoint at {path}; starting fresh", flush=True)
         return 0, 0, 0, []
     checkpoint = torch.load(path, map_location="cpu", weights_only=False)
+    if checkpoint.get("data_protocol", "legacy") != args.data_protocol:
+        raise ValueError("Resume data protocol differs from this run")
+    if checkpoint.get("train_manifest_sha256", args.train_manifest_sha256) != args.train_manifest_sha256:
+        raise ValueError("Resume training manifest hash differs from this run")
     if checkpoint.get("baseline_method") != args.method:
         raise ValueError(f"Checkpoint method mismatch: {path}")
+    if args.method == "token_readout" and checkpoint.get("token_readout_position", "answer") != args.token_readout_position:
+        raise ValueError(f"Checkpoint token-readout position mismatch: {path}")
     if int(checkpoint.get("visual_buffer_frames", -1)) != args.visual_buffer_frames:
         raise ValueError(f"Checkpoint B mismatch: {path}")
     if int(checkpoint.get("max_frames", -1)) != args.max_frames:
@@ -194,8 +209,13 @@ def load_resume(args, model, optimizer, device: str) -> tuple[int, int, int, lis
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--method", choices=("lora", "token_readout"), required=True)
+    parser.add_argument("--token_readout_position", choices=("answer", "before_question", "before_visual"),
+                        default="answer", help="Where Token-Readout memory tokens enter the prompt")
     parser.add_argument("--model_path", default="ckpt/Qwen2.5-VL-3B-Instruct")
     parser.add_argument("--llava_data_file", default="data/llava-video-178k/trainset_9k.jsonl")
+    parser.add_argument("--data_protocol", choices=("legacy", "rebuttal_decontaminated_v1"), default="legacy")
+    parser.add_argument("--offload_answer_activations", action="store_true")
+    parser.add_argument("--offload_frozen_decoder_for_vision", action="store_true")
     parser.add_argument("--llava_video_root", default="data/llava-video-178k/frames")
     parser.add_argument("--out_ckpt", required=True)
     parser.add_argument("--fps", type=float, default=1.0)
@@ -216,6 +236,8 @@ def main() -> None:
     parser.add_argument("--skip_bad_samples", action="store_true")
     parser.add_argument("--save_every", type=int, default=200)
     parser.add_argument("--log_every", type=int, default=10)
+    parser.add_argument("--distributed_timeout_seconds", type=int, default=600,
+                        help="Collective timeout; increase for long samples on shared GPUs")
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--overwrite", action="store_true")
     parser.add_argument("--device", default="auto")
@@ -229,6 +251,9 @@ def main() -> None:
     parser.add_argument("--pred_weight", type=float, default=0.2)
     parser.add_argument("--pred_tokens", type=int, default=4)
     args = parser.parse_args()
+
+    if args.distributed_timeout_seconds <= 0:
+        parser.error("--distributed_timeout_seconds must be positive")
 
     if args.max_frames != 240 or args.visual_buffer_frames != 16:
         parser.error("The registered same-backbone protocol requires T=240 and B=16")
@@ -255,7 +280,9 @@ def main() -> None:
         )
     gradient_accumulation_steps = args.global_batch_size // world_size
     if distributed:
-        dist.init_process_group("nccl")
+        dist.init_process_group(
+            "nccl", timeout=timedelta(seconds=args.distributed_timeout_seconds)
+        )
         torch.cuda.set_device(local_rank)
         args.device = f"cuda:{local_rank}"
     is_main = rank == 0
@@ -269,6 +296,12 @@ def main() -> None:
     if torch.cuda.is_available():
         torch.cuda.reset_peak_memory_stats()
     model, memory, processor, attn, trainable_count = load_models(args, device)
+    if args.offload_frozen_decoder_for_vision:
+        if args.method != "token_readout":
+            raise ValueError("Frozen-decoder offloading only supports the Token-Readout control")
+        from models.training_memory import offload_frozen_decoder_for_vision
+
+        offload_frozen_decoder_for_vision(model)
     trainable = [parameter for parameter in model.parameters() if parameter.requires_grad]
     optimizer = torch.optim.AdamW(trainable, lr=args.lr)
 
@@ -283,6 +316,9 @@ def main() -> None:
     )
     source_count = len(source_rows)
     qa_count = count_llava_qa_pairs(source_rows)
+    args.train_manifest_sha256 = hashlib.sha256(Path(args.llava_data_file).read_bytes()).hexdigest()
+    if args.data_protocol == "rebuttal_decontaminated_v1" and (source_count != 8953 or qa_count != 17849):
+        raise ValueError("Expected the verified 8,953-row / 17,849-QA decontaminated split")
     rows = flatten_llava_qa_rows(source_rows)
     all_train_ids = split_id_payload(rows, 5000)
     if distributed:
@@ -306,6 +342,8 @@ def main() -> None:
                 {
                     "data_semantics": "same_backbone_controls_v1",
                     "llava_data_file": args.llava_data_file,
+                    "train_manifest_sha256": args.train_manifest_sha256,
+                    "data_protocol": args.data_protocol,
                     "llava_video_root": args.llava_video_root,
                     "source_train_samples": source_count,
                     "source_train_qa": qa_count,
@@ -323,6 +361,7 @@ def main() -> None:
         print(
             f"[load] method={args.method} model={args.model_path} attn={attn} "
             f"world_size={world_size} global_batch={args.global_batch_size} "
+            f"timeout_seconds={args.distributed_timeout_seconds} "
             f"grad_accum={gradient_accumulation_steps} updates_per_epoch="
             f"{optimizer_updates_per_epoch} trainable={trainable_count:,} train_qa={qa_count}",
             flush=True,
@@ -352,6 +391,10 @@ def main() -> None:
             "max_pixels": args.max_pixels,
             "fps": args.fps,
             "llava_data_file": args.llava_data_file,
+            "train_manifest_sha256": args.train_manifest_sha256,
+            "data_protocol": args.data_protocol,
+            "offload_answer_activations": args.offload_answer_activations,
+            "offload_frozen_decoder_for_vision": args.offload_frozen_decoder_for_vision,
             "llava_video_root": args.llava_video_root,
             "source_train_samples": source_count,
             "source_train_qa": qa_count,
@@ -374,6 +417,7 @@ def main() -> None:
             "global_batch_size": args.global_batch_size,
             "gradient_accumulation_steps": gradient_accumulation_steps,
             "train_wall_seconds": time.time() - started,
+            "distributed_timeout_seconds": args.distributed_timeout_seconds,
             "train_peak_gpu_memory_allocated_bytes": (
                 int(torch.cuda.max_memory_allocated(device)) if torch.cuda.is_available() else 0
             ),
@@ -398,6 +442,7 @@ def main() -> None:
                     "prem_modulation": "none",
                     "read_interface": "in_sequence_tokens",
                     "memory_prompt_tokens": token_readout_count(memory),
+                    "token_readout_position": args.token_readout_position,
                     "max_memory_tokens": args.max_memory_tokens,
                     "pred_weight": args.pred_weight,
                     "pred_tokens": args.pred_tokens,
@@ -433,7 +478,9 @@ def main() -> None:
                             device,
                             "qwen2_5vl",
                         )
-                        output = model(**answer_inputs, use_cache=False, return_dict=True)
+                        with (torch.autograd.graph.save_on_cpu(pin_memory=OFFLOAD_PIN_MEMORY)
+                              if args.offload_answer_activations else nullcontext()):
+                            output = model(**answer_inputs, use_cache=False, return_dict=True)
                         loss = output.loss
                     else:
                         writer_inputs, writer_prompt_length = build_llava_inputs(
@@ -472,13 +519,13 @@ def main() -> None:
                             device,
                             "qwen2_5vl",
                         )
-                        expanded, _ = build_token_readout_inputs(
-                            model,
-                            answer_inputs,
-                            stream_state,
-                            answer_prompt_length,
-                        )
-                        output = model(**expanded, use_cache=False, return_dict=True)
+                        with (torch.autograd.graph.save_on_cpu(pin_memory=OFFLOAD_PIN_MEMORY)
+                              if args.offload_answer_activations else nullcontext()):
+                            expanded, _ = build_token_readout_inputs(
+                                model, answer_inputs, stream_state, answer_prompt_length,
+                                position=args.token_readout_position,
+                            )
+                            output = model(**expanded, use_cache=False, return_dict=True)
                         loss = output.loss + args.pred_weight * pred_loss
                     if not torch.isfinite(loss):
                         raise FloatingPointError(f"non-finite loss: {float(loss.detach())}")

@@ -19,6 +19,7 @@ from models.same_backbone_baselines import (
     qwen25_lora_parameter_count,
     token_readout_count,
     token_readout_embeddings,
+    token_readout_insert_index,
 )
 from scripts.eval.eval_prem_online import update_visual_buffer
 from scripts.eval.eval_same_backbone_online import (
@@ -40,6 +41,19 @@ def test_qwen25_rank20_lora_is_parameter_matched():
     )
     config = SimpleNamespace(text_config=text_config)
     assert qwen25_lora_parameter_count(config, rank=20) == 9_216_000
+
+
+def test_token_readout_insert_index_positions():
+    ids = torch.tensor([[1, 2, 50, 3, 4, 51, 5, 6]])
+    assert token_readout_insert_index(ids, 8, "answer", 50, 51) == 8
+    assert token_readout_insert_index(ids, 8, "before_question", 50, 51) == 6
+    assert token_readout_insert_index(ids, 8, "before_visual", 50, 51) == 2
+    try:
+        token_readout_insert_index(ids, 8, "middle", 50, 51)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("unknown position must fail")
 
 
 def test_token_readout_uses_all_matched_heads_and_propagates_gradients():

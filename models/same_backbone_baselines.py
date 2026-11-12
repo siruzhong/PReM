@@ -225,11 +225,42 @@ def insert_prompt_embeddings(
     return result
 
 
+TOKEN_READOUT_POSITIONS = ("answer", "before_question", "before_visual")
+
+
+def token_readout_insert_index(
+    input_ids: torch.Tensor,
+    prompt_length: int,
+    position: str,
+    vision_start_token_id: int,
+    vision_end_token_id: int,
+) -> int:
+    """Return where memory tokens enter a batch-size-one Qwen prompt.
+
+    ``answer`` keeps the submitted protocol (prompt/answer boundary).
+    ``before_question`` inserts right after ``<|vision_end|>`` so question and
+    option tokens can attend to memory. ``before_visual`` inserts right before
+    ``<|vision_start|>`` so visual, question, and option tokens can attend to it.
+    """
+    if position not in TOKEN_READOUT_POSITIONS:
+        raise ValueError(f"Unknown token-readout position: {position}")
+    if position == "answer":
+        return int(prompt_length)
+    row = input_ids[0, : int(prompt_length)]
+    token_id = vision_end_token_id if position == "before_question" else vision_start_token_id
+    hits = torch.nonzero(row.eq(int(token_id)), as_tuple=False).flatten()
+    if hits.numel() != 1:
+        raise ValueError(f"Expected one vision boundary token for {position}, found {hits.numel()}")
+    index = int(hits.item())
+    return index + 1 if position == "before_question" else index
+
+
 def build_token_readout_inputs(
     model,
     inputs: dict[str, Any],
     stream_state: dict[str, Any] | torch.Tensor,
     prompt_length: int,
+    position: str = "answer",
 ) -> tuple[dict[str, torch.Tensor], dict[str, int]]:
     """Materialize a Qwen prompt and insert recurrent-memory readout tokens."""
     embeddings, position_ids = materialize_qwen25_embeddings(model, inputs)
@@ -252,11 +283,18 @@ def build_token_readout_inputs(
         attention_mask,
         position_ids,
         memory_tokens,
-        int(prompt_length),
+        token_readout_insert_index(
+            input_ids,
+            int(prompt_length),
+            position,
+            model.config.vision_start_token_id,
+            model.config.vision_end_token_id,
+        ),
         inputs.get("labels"),
     )
     stats = {
         "auxiliary_prompt_tokens": int(memory_tokens.shape[1]),
+        "token_readout_position": position,
         "decoder_prompt_tokens": int(attention_mask.sum().item() + memory_tokens.shape[1]),
         "memory_state_bytes": recurrent_state_bytes(stream_state),
     }

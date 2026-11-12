@@ -9,6 +9,28 @@ EXPECTED_WRITER_MODE = "temporal_mean_per_step"
 VALID_MODULATION_MODES = ("attention", "attention_kv", "attention_k", "attention_v")
 
 
+def normalize_prem_checkpoint(checkpoint: dict) -> dict:
+    """Resolve historical OSTEM field names without modifying weights or recipes."""
+    normalized = dict(checkpoint)
+    for legacy, current in (
+        ("ostem_state_dict", "prem_state_dict"),
+        ("ostem_layer_groups", "prem_layer_groups"),
+        ("ostem_modulation", "prem_modulation"),
+        ("ostem_placement", "prem_placement"),
+    ):
+        if legacy not in checkpoint:
+            continue
+        if current in checkpoint:
+            if current.endswith("state_dict"):
+                if checkpoint[current] is not checkpoint[legacy]:
+                    raise ValueError(f"Ambiguous checkpoint fields: {legacy}, {current}")
+            elif checkpoint[current] != checkpoint[legacy]:
+                raise ValueError(f"Conflicting checkpoint fields: {legacy}, {current}")
+        else:
+            normalized[current] = checkpoint[legacy]
+    return normalized
+
+
 def validate_prem_checkpoint(checkpoint: dict) -> None:
     if not checkpoint.get("complete", False):
         raise ValueError("PREM checkpoint is incomplete and cannot be used for formal evaluation")

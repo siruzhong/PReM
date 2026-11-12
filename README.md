@@ -5,7 +5,7 @@ Official implementation of **PReM: Prefix-Steered Recurrent Memory for Long-Vide
 [![Paper](https://img.shields.io/badge/arXiv-2609.23601-b31b1b.svg)](https://arxiv.org/abs/2609.23601)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-[Installation](#installation) · [Data](#data) · [Training](#training) · [Evaluation](#evaluation) · [Citation](#citation)
+[Installation](#installation) · [Data](#data) · [Training](#training) · [Evaluation](#evaluation) · [Rebuttal controls](#rebuttal-controls) · [Citation](#citation)
 
 ![PReM architecture: frozen video encoding, recurrent write, and prefix steering](docs/assets/architecture.png)
 
@@ -147,6 +147,36 @@ bash scripts/eval/run_eval.sh
 ```
 
 `MAX_FRAMES` is the writer ingestion cap `T`. `BUFFER_FRAMES` is the decoder budget `B` used by frozen Base and by the online reservoir; PReM reads `B` from the checkpoint and, offline, samples the same uniform `B` frames as Base from that stream. Online Base and PReM share the same deterministic reservoir policy (`update_visual_buffer`). The Qwen harness above supports Qwen2, Qwen2.5, and Qwen3; use `scripts/eval/eval_prem_llava_video.py` or the LLaVA launcher for LLaVA-Video.
+
+## Rebuttal controls
+
+Additional entry points reproduce the ICLR rebuttal writer and Token-Readout stacks (Tables 3/4/13 and related probes). They share the verified decontaminated split (`8,953` rows / `17,849` QA; `--data_protocol rebuttal_decontaminated_v1`).
+
+| Component | Path |
+| --- | --- |
+| Temporal-mean / EMA writers | `models/prem_writer_controls.py`; `--writer_variant {temporal_mean,ema}` in `scripts/train/train.py` |
+| Token-Readout position / `K` sweep | `--token_readout_position` and `--num_slots` in `scripts/train/train_same_backbone.py` |
+| Frame-cap / needle / pooled-writer eval | `scripts/eval/eval_rebuttal_memory.py`, `run_rebuttal_memory.py` |
+| Summaries | `scripts/eval/summarize_rebuttal_memory.py`, `summarize_rebuttal_campaign.py` |
+| Optional multi-GPU dispatcher | `scripts/train/run_rebuttal_campaign.py` (`PREM_REBUTTAL_RUN_DIR`, `PREM_REBUTTAL_DATA`, `PREM_REBUTTAL_NPROC`) |
+
+Example: train a Temporal-mean writer control, then run the natural-video / needle probe suite:
+
+```bash
+torchrun --standalone --nproc_per_node=8 scripts/train/train.py \
+  --model_type qwen2_5vl --model_path ckpt/Qwen2.5-VL-3B-Instruct \
+  --llava_data_file data/llava-video-178k/trainset_9k.jsonl \
+  --data_protocol rebuttal_decontaminated_v1 --dev_ratio 0 \
+  --writer_variant temporal_mean --num_slots 1 --prem_layer_groups 4 \
+  --prem_modulation attention_kv --alpha 0.75 --max_frames 240 \
+  --visual_buffer_frames 16 --pred_weight 0.2 --pred_tokens 4 \
+  --out_ckpt outputs/rebuttal/temporal_mean/prem.pt
+
+python -u scripts/eval/run_rebuttal_memory.py \
+  --checkpoint outputs/rebuttal/temporal_mean/prem.pt \
+  --output_dir outputs/rebuttal/temporal_mean/eval \
+  --mode natural --frame_caps 240,480,960 --datasets lvbench
+```
 
 ## Acknowledgements
 
