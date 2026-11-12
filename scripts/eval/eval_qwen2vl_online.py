@@ -1,10 +1,9 @@
 #!/usr/bin/env python
 """Budget-constrained end-time evaluation for unmodified Qwen-VL backbones.
 
-This is an online baseline, not a recurrent-memory model.  Before the
-question arrives it keeps a fixed, question-agnostic reservoir of video
-frames. At end time the backbone answers from the question and that bounded raw
-video buffer.
+Online Base keeps a fixed, question-agnostic B-frame reservoir. Indices use the
+same deterministic policy as PReM's ``update_visual_buffer``, so Base and PReM
+share decoder frames under matched ``BUFFER_FRAMES`` / checkpoint ``B``.
 """
 
 from __future__ import annotations
@@ -38,7 +37,7 @@ from scripts.eval.eval_prem_online import (
 from scripts.eval.data_io import load_records
 from scripts.eval.inference_mcq_vqa import get_sample_media_name, normalize_mcq_sample
 from qwen_vl_utils import process_vision_info, qwen3_video_metadata
-from scripts.eval.stream_buffer import stable_reservoir_indices
+from scripts.eval.stream_buffer import deterministic_reservoir_indices
 
 
 def uniform_subsample(items: list, target_count: int) -> list:
@@ -87,7 +86,8 @@ def visual_token_count(video_grid_thw: torch.Tensor, spatial_merge_size: int) ->
 
 
 def select_online_buffer(processor, frames: list, video_key: str, args, spatial_merge_size: int, model_type: str):
-    indices = stable_reservoir_indices(len(frames), args.buffer_frames, video_key)
+    del video_key  # Buffer indices match PReM's update_visual_buffer and ignore the key.
+    indices = deterministic_reservoir_indices(len(frames), args.buffer_frames)
     buffer_frames = [frames[index] for index in indices]
     if len(buffer_frames) > 1 and len(buffer_frames) % 2:
         buffer_frames = buffer_frames[:-1]
@@ -237,6 +237,7 @@ def run_worker(args):
             "max_frames": args.max_frames,
             "fps": args.fps,
             "buffer_frames": args.buffer_frames,
+            "visual_buffer_policy": "deterministic_reservoir",
             "max_video_tokens": args.max_video_tokens,
             "max_pixels": args.max_pixels,
             "time_constrained": bool(args.time_constrained),

@@ -104,12 +104,12 @@ def main():
     ap.add_argument("--mcq_max_new_tokens", type=int, default=1)
     ap.add_argument("--max_new_tokens", type=int, default=512)
     # PREM-Online specific
-    ap.add_argument("--prem_alpha", type=float, default=1.0, help="Multiplier on the learned PREM steer scale")
+    ap.add_argument("--prem_alpha", type=float, default=0.75, help="Multiplier on the learned PREM steer scale")
     ap.add_argument("--prem_override_alpha", action="store_true", help="Override alpha stored in the PREM checkpoint")
     ap.add_argument(
         "--prem_modulation",
         choices=["attention", "attention_kv", "attention_k", "attention_v"],
-        default="attention",
+        default="attention_kv",
     )
     ap.add_argument("--prem_disable_anti_distractor", action="store_true")
     ap.add_argument("--prem_disable_novelty", action="store_true")

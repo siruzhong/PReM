@@ -9,12 +9,13 @@ PYTHON_BIN="${PYTHON_BIN:-python}"
 DATASETS="${DATASETS:-egoschema,mlvu,longvideobench,videomme}"
 FPS="${FPS:-1.0}"
 MAX_FRAMES="${MAX_FRAMES:-240}"
+BUFFER_FRAMES="${BUFFER_FRAMES:-16}"
 MAX_PIXELS="${MAX_PIXELS:-200704}"
 MCQ_MAX_NEW_TOKENS="${MCQ_MAX_NEW_TOKENS:-1}"
 MAX_NEW_TOKENS="${MAX_NEW_TOKENS:-512}"
-PREM_ALPHA="${PREM_ALPHA:-1.0}"
+PREM_ALPHA="${PREM_ALPHA:-0.75}"
 OVERRIDE_PREM_ALPHA="${OVERRIDE_PREM_ALPHA:-0}"
-PREM_MODULATION="${PREM_MODULATION:-attention}"
+PREM_MODULATION="${PREM_MODULATION:-attention_kv}"
 PREM_DISABLE_ANTI_DISTRACTOR="${PREM_DISABLE_ANTI_DISTRACTOR:-0}"
 PREM_DISABLE_NOVELTY="${PREM_DISABLE_NOVELTY:-0}"
 PREM_DISABLE_STABILITY="${PREM_DISABLE_STABILITY:-0}"
@@ -106,7 +107,8 @@ run_offline() {
     --prem_ckpt "${PREM_CKPT}"
     --output_dir "${OUTPUT_DIR}"
     --datasets "${DATASETS}"
-    --fps "${FPS}" --max_frames "${MAX_FRAMES}" --max_pixels "${MAX_PIXELS}"
+    --fps "${FPS}" --max_frames "${MAX_FRAMES}" --buffer_frames "${BUFFER_FRAMES}"
+    --max_pixels "${MAX_PIXELS}"
     --mcq_max_new_tokens "${MCQ_MAX_NEW_TOKENS}" --max_new_tokens "${MAX_NEW_TOKENS}"
     --prem_alpha "${PREM_ALPHA}" --prem_modulation "${PREM_MODULATION}"
   )
@@ -223,13 +225,13 @@ run_online() {
         --flash_chunk_frames "${FLASH_CHUNK_FRAMES:-1}")
       ;;
     qwen25vl|qwen3vl)
-      args+=(--buffer_frames "${BUFFER_FRAMES:-16}" --max_video_tokens "${MAX_VIDEO_TOKENS:-11520}")
+      args+=(--buffer_frames "${BUFFER_FRAMES}" --max_video_tokens "${MAX_VIDEO_TOKENS:-11520}")
       if [[ "${TEXT_ONLY}" == "1" ]]; then
         args+=(--text_only)
       fi
       ;;
     qwen2vl)
-      args+=(--buffer_frames "${BUFFER_FRAMES:-16}" --max_video_tokens "${MAX_VIDEO_TOKENS:-11520}")
+      args+=(--buffer_frames "${BUFFER_FRAMES}" --max_video_tokens "${MAX_VIDEO_TOKENS:-11520}")
       if [[ "${TEXT_ONLY}" == "1" ]]; then
         args+=(--text_only)
       fi

@@ -8,6 +8,7 @@ from scripts.eval.eval_prem_online import (
     get_video_grouped_chunk,
     update_visual_buffer,
 )
+from scripts.eval.stream_buffer import deterministic_reservoir_indices
 
 
 def test_query_time_rows_are_sorted_within_video():
@@ -64,6 +65,9 @@ def test_visual_buffer_is_causal_deterministic_and_bounded():
     ]
     assert first["visual_buffer_seen"] == 10
     assert first["stats"]["visual_buffer_bytes"] <= 3 * 6 * 3
+    assert [index for index, _ in first["visual_buffer"]] == deterministic_reservoir_indices(
+        10, 3
+    )
 
 
 def test_decord_eof_errors_are_detected():

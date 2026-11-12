@@ -288,16 +288,17 @@ def select_stream_buffer_frames(
     budget: int,
     video_key: str,
 ) -> tuple[np.ndarray, list[float]]:
-    """Keep a question-agnostic online buffer of at most `budget` stream frames."""
-    from scripts.eval.stream_buffer import stable_reservoir_indices
+    """Keep a question-agnostic online buffer matching PReM's reservoir policy."""
+    from scripts.eval.stream_buffer import deterministic_reservoir_indices
 
+    del video_key  # Kept for call-site compatibility; selection ignores the key.
     if len(frames) != len(timestamps):
         raise ValueError(
             f"Frame/timestamp length mismatch: {len(frames)} != {len(timestamps)}"
         )
     if budget <= 0:
         return frames[:0], []
-    indices = stable_reservoir_indices(len(frames), budget, video_key)
+    indices = deterministic_reservoir_indices(len(frames), budget)
     return frames[np.asarray(indices, dtype=int)], [
         float(timestamps[index]) for index in indices
     ]
@@ -312,7 +313,7 @@ def load_llava_base_online_frames(
     video_key: str,
     duration_hint: float | None = None,
 ):
-    """Decoder frames for LLaVA online: 1fps cap `stream_max_frames`, then reservoir to B."""
+    """Decoder frames for LLaVA online: 1fps stream cap, then PReM-matched reservoir to B."""
     stream_frames, stream_timestamps, duration = load_video_frames(
         media_path,
         max_frames=stream_max_frames,

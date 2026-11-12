@@ -512,7 +512,7 @@ def main():
     ap.add_argument("--num_slots", type=int, default=4)
     ap.add_argument("--mem_dim", type=int, default=128)
     ap.add_argument("--prem_layer_groups", type=int, default=1, help="1 keeps static correction; >1 uses grouped contextual reads")
-    ap.add_argument("--alpha", type=float, default=1.0, help="Initial learned PREM steer scale")
+    ap.add_argument("--alpha", type=float, default=0.75, help="Initial learned PREM steer scale")
     ap.add_argument(
         "--prem_modulation",
         type=str,

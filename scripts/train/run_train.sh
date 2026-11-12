@@ -123,9 +123,9 @@ fi
   --pred_tokens "${PRED_TOKENS:-8}" \
   --num_slots "${NUM_SLOTS:-4}" \
   --mem_dim "${MEM_DIM:-128}" \
-  --prem_layer_groups "${PREM_LAYER_GROUPS:-1}" \
+  --prem_layer_groups "${PREM_LAYER_GROUPS:-4}" \
   --lr "${LR:-2e-4}" \
-  --alpha "${ALPHA:-1.0}" \
+  --alpha "${ALPHA:-0.75}" \
   --seed "${SEED:-13}" \
   --prem_modulation "${PREM_MODULATION:-attention}" \
   --log_every "${LOG_EVERY:-20}" \

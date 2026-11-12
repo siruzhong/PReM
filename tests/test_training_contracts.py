@@ -44,8 +44,8 @@ def test_checkpoint_resume_cursor(checkpoint, expected):
 
 
 def test_warmup_ratio_uses_total_update_count():
-    assert warmup_steps_from_ratio(total_updates=2255, epochs=1, ratio=0.03) == 67
-    assert warmup_steps_from_ratio(total_updates=2255, epochs=1, ratio=0.0) == 0
+    assert warmup_steps_from_ratio(total_updates=2232, epochs=1, ratio=0.03) == 66
+    assert warmup_steps_from_ratio(total_updates=2232, epochs=1, ratio=0.0) == 0
 
 
 def test_model_calls_do_not_use_legacy_keyword_arguments():

@@ -133,6 +133,7 @@ def load_prem_wrapper(args):
 
 
 def validate_control_checkpoint(checkpoint: dict, args, method: str) -> None:
+    # Decontaminated LLaVA-Video-178K split used by the paper / README (6,430 videos).
     expected = {
         "complete": True,
         "baseline_method": method,
@@ -141,10 +142,10 @@ def validate_control_checkpoint(checkpoint: dict, args, method: str) -> None:
         "visual_buffer_frames": args.buffer_frames,
         "max_pixels": args.max_pixels,
         "data_semantics": "same_backbone_controls_v1",
-        "source_train_samples": 9000,
-        "source_train_qa": 18038,
-        "train_samples": 18038,
-        "train_steps": 2255,
+        "source_train_samples": 8953,
+        "source_train_qa": 17849,
+        "train_samples": 17849,
+        "train_steps": 2232,
         "skipped": 0,
         "skip_oom": False,
         "skip_bad_samples": False,
@@ -1056,7 +1057,7 @@ def main() -> None:
         choices=("attention", "attention_kv", "attention_k", "attention_v"),
         default="attention_kv",
     )
-    parser.add_argument("--prem_alpha", type=float, default=1.0)
+    parser.add_argument("--prem_alpha", type=float, default=0.75)
     parser.add_argument("--prem_override_alpha", action="store_true")
     parser.add_argument("--prem_num_slots", type=int, default=1)
     parser.add_argument("--prem_mem_dim", type=int, default=128)

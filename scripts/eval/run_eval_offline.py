@@ -250,16 +250,23 @@ def main():
     ap.add_argument("--cuda_devices", default=None)
     ap.add_argument("--workers_per_gpu", type=int, default=None)
     ap.add_argument("--max_frames", type=int, default=OFFICIAL_MAX_FRAMES)
+    ap.add_argument(
+        "--buffer_frames",
+        type=int,
+        default=None,
+        help="Decoder budget B for frozen Base; defaults to --max_frames. "
+        "Matched PReM comparisons should set this to the checkpoint visual buffer (e.g. 16).",
+    )
     ap.add_argument("--fps", type=float, default=1.0)
     ap.add_argument("--max_pixels", type=int, default=OFFICIAL_MAX_PIXELS)
     ap.add_argument("--mcq_max_new_tokens", type=int, default=1)
     ap.add_argument("--max_new_tokens", type=int, default=512)
-    ap.add_argument("--prem_alpha", type=float, default=1.0, help="Multiplier on the learned PREM steer scale")
+    ap.add_argument("--prem_alpha", type=float, default=0.75, help="Multiplier on the learned PREM steer scale")
     ap.add_argument("--prem_override_alpha", action="store_true", help="Override alpha stored in the PREM checkpoint")
     ap.add_argument(
         "--prem_modulation",
         choices=["attention", "attention_kv", "attention_k", "attention_v"],
-        default="attention",
+        default="attention_kv",
     )
     ap.add_argument("--prem_disable_anti_distractor", action="store_true")
     ap.add_argument("--prem_disable_novelty", action="store_true")
@@ -350,6 +357,13 @@ def main():
                     if enabled:
                         cmd.append(flag)
             else:
+                # Base/Flash decoder frames: use B when provided so offline Base
+                # matches PReM's uniform B-frame prompt (writer still uses max_frames).
+                decoder_frames = (
+                    args.buffer_frames
+                    if method_name != "flash_vstream" and args.buffer_frames is not None
+                    else args.max_frames
+                )
                 cmd = [
                     sys.executable,
                     str(REPO_ROOT / "scripts/eval/eval_any_dataset.py"),
@@ -358,7 +372,7 @@ def main():
                     "--output_dir", args.output_dir,
                     "--evaluation_name", method_name,
                     "--num_chunks", str(args.num_chunks),
-                    "--max_frames", str(args.max_frames),
+                    "--max_frames", str(decoder_frames),
                     "--fps", str(args.fps),
                     "--max_pixels", str(args.max_pixels),
                     "--mcq_max_new_tokens", str(args.mcq_max_new_tokens),

@@ -101,7 +101,7 @@ LongVideoBench records with `candidates` and `correct_choice` are also supported
 
 ## Training
 
-Example: train PReM on Qwen2.5-VL-3B (`K=4`, `d_v=d_k=128`, writer cap `T=64`, visual buffer `B`, evidence prediction on):
+Example: train the paper's main Qwen2.5-VL-3B recipe (`K=4`, `G=4`, `α_train=0.75`, writer cap `T=64`, visual buffer `B=16`):
 
 ```bash
 MODEL_TYPE=qwen2_5vl \
@@ -109,16 +109,16 @@ MODEL_PATH=ckpt/Qwen2.5-VL-3B-Instruct \
 OUT_DIR=outputs/prem_attention/qwen25 \
 DATA_FILE=data/llava-video-178k/trainset_9k.jsonl \
 VIDEO_ROOT=data/llava-video-178k/frames \
-NUM_SLOTS=4 MEM_DIM=128 PREM_LAYER_GROUPS=1 PREM_MODULATION=attention_kv \
+NUM_SLOTS=4 MEM_DIM=128 PREM_LAYER_GROUPS=4 PREM_MODULATION=attention_kv \
 MAX_FRAMES=64 VISUAL_BUFFER_FRAMES=16 MAX_PIXELS=200704 \
-PRED_WEIGHT=0.2 PRED_TOKENS=4 ROUTER_GAMMA=0.10 \
+ALPHA=0.75 PRED_WEIGHT=0.2 PRED_TOKENS=4 ROUTER_GAMMA=0.10 \
 LR=2e-4 SEED=13 \
 bash scripts/train/run_train.sh
 ```
 
 `run_train.sh` launches distributed training. Use `RESUME=1` to resume an existing checkpoint.
 
-The end-to-end launchers sweep decoder budgets and steering strengths. Their defaults differ by backbone and include search configurations (the Qwen2.5 launcher defaults to `K=1`, `G=4`, and EgoSchema). Inspect or override their environment variables for the experiment you intend to run:
+The end-to-end launchers default to that main recipe (`K=4`, `G=4`, `α=0.75`). Override their environment variables for ablations or budget sweeps:
 
 ```bash
 bash scripts/run_prem_kv_qwen25_3b.sh   # Qwen2.5-VL-3B
@@ -134,17 +134,19 @@ The unified harness `scripts/eval/run_eval.sh` dispatches to the offline (`run_e
 # Offline (full-video) evaluation of a trained checkpoint
 EVAL_MODE=offline MODEL_FAMILY=qwen25 OFFLINE_MODEL=prem \
 MODEL_PATH=ckpt/Qwen2.5-VL-3B-Instruct PREM_CKPT=outputs/prem_attention/qwen25/prem.pt \
-MAX_FRAMES=240 PREM_MODULATION=attention_kv DATASETS=longvideobench,mlvu,videomme,egoschema,mvbench,lvbench \
+MAX_FRAMES=240 BUFFER_FRAMES=16 PREM_ALPHA=0.75 PREM_MODULATION=attention_kv \
+DATASETS=longvideobench,mlvu,videomme,egoschema,mvbench,lvbench \
 bash scripts/eval/run_eval.sh
 
 # Streaming (end-of-stream) evaluation
 EVAL_MODE=online MODEL_FAMILY=qwen25 ONLINE_MODEL=prem \
 MODEL_PATH=ckpt/Qwen2.5-VL-3B-Instruct PREM_CKPT=outputs/prem_attention/qwen25/prem.pt \
-MAX_FRAMES=240 PREM_MODULATION=attention_kv DATASETS=longvideobench,mlvu,videomme,egoschema,mvbench,lvbench \
+MAX_FRAMES=240 BUFFER_FRAMES=16 PREM_ALPHA=0.75 PREM_MODULATION=attention_kv \
+DATASETS=longvideobench,mlvu,videomme,egoschema,mvbench,lvbench \
 bash scripts/eval/run_eval.sh
 ```
 
-The decoder budget `B` is read from the PReM checkpoint, independently of the writer cap `MAX_FRAMES`. The Qwen harness above supports Qwen2, Qwen2.5, and Qwen3; use `scripts/eval/eval_prem_llava_video.py` or the LLaVA launcher for LLaVA-Video.
+`MAX_FRAMES` is the writer ingestion cap `T`. `BUFFER_FRAMES` is the decoder budget `B` used by frozen Base and by the online reservoir; PReM reads `B` from the checkpoint and, offline, samples the same uniform `B` frames as Base from that stream. Online Base and PReM share the same deterministic reservoir policy (`update_visual_buffer`). The Qwen harness above supports Qwen2, Qwen2.5, and Qwen3; use `scripts/eval/eval_prem_llava_video.py` or the LLaVA launcher for LLaVA-Video.
 
 ## Acknowledgements
 

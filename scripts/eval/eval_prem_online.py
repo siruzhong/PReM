@@ -387,6 +387,51 @@ def update_visual_buffer(
     stream_state["stats"] = stats
 
 
+def set_uniform_visual_buffer(
+    stream_state: dict,
+    frames: list,
+    budget: int,
+    max_pixels: int | None = None,
+) -> None:
+    """Replace the decoder buffer with B frames uniformly sampled from the writer stream."""
+    from scripts.eval.stream_buffer import uniform_frame_indices
+
+    budget = int(budget)
+    if budget <= 0 or not frames:
+        stream_state["visual_buffer"] = []
+        stream_state["visual_buffer_seen"] = len(frames)
+        stats = dict(stream_state.get("stats", {}))
+        stats.update(
+            {
+                "visual_buffer_frames": 0,
+                "visual_buffer_capacity": budget,
+                "visual_buffer_policy": "uniform_offline",
+                "visual_buffer_bytes": 0,
+            }
+        )
+        stream_state["stats"] = stats
+        return
+    indices = uniform_frame_indices(len(frames), budget)
+    buffer = [
+        (int(index), _materialize_frame(frames[index], max_pixels)) for index in indices
+    ]
+    stream_state["visual_buffer"] = buffer
+    stream_state["visual_buffer_seen"] = len(frames)
+    visual_buffer_bytes = sum(
+        frame.width * frame.height * len(frame.getbands()) for _, frame in buffer
+    )
+    stats = dict(stream_state.get("stats", {}))
+    stats.update(
+        {
+            "visual_buffer_frames": len(buffer),
+            "visual_buffer_capacity": budget,
+            "visual_buffer_policy": "uniform_offline",
+            "visual_buffer_bytes": visual_buffer_bytes,
+        }
+    )
+    stream_state["stats"] = stats
+
+
 def get_video_grouped_chunk(rows: list[dict], num_chunks: int, chunk_idx: int) -> list[dict]:
     """Keep every question for a video on one worker and in adjacent rows."""
     groups = {}
@@ -530,6 +575,20 @@ def update_stream_state(model, processor, stream_state, frames: list, prem_cfg: 
     })
     stats["state_bytes"] = stats["memory_state_bytes"] + int(stats.get("visual_buffer_bytes", 0))
     stream_state["stats"] = stats
+    # Offline (chunk_frames covers the full writer cap): decoder uses uniform B from
+    # the same stream the writer ingested, matching Base's offline B-frame sample.
+    if int(getattr(args, "chunk_frames", 0) or 0) >= int(getattr(args, "max_frames", 0) or 0):
+        set_uniform_visual_buffer(
+            stream_state,
+            frames,
+            prem_cfg["visual_buffer_frames"],
+            max_pixels=args.max_pixels,
+        )
+        stats = dict(stream_state.get("stats", {}))
+        stats["state_bytes"] = int(stats.get("memory_state_bytes", 0)) + int(
+            stats.get("visual_buffer_bytes", 0)
+        )
+        stream_state["stats"] = stats
     return stream_state
 
 
@@ -980,17 +1039,17 @@ def main():
     parser.add_argument("--max_pixels", type=int, default=200704)
     parser.add_argument("--mcq_max_new_tokens", type=int, default=1)
     parser.add_argument("--max_new_tokens", type=int, default=512)
-    parser.add_argument("--prem_alpha", type=float, default=1.0, help="Multiplier on the learned PREM steer scale")
+    parser.add_argument("--prem_alpha", type=float, default=0.75, help="Multiplier on the learned PREM steer scale")
     parser.add_argument("--prem_override_alpha", action="store_true", help="Override alpha stored in the PREM checkpoint")
     parser.add_argument(
         "--prem_modulation",
         choices=["attention", "attention_kv", "attention_k", "attention_v"],
-        default="attention",
+        default="attention_kv",
         help="Attention projection modulation used by the checkpoint",
     )
     parser.add_argument("--prem_num_slots", type=int, default=4)
     parser.add_argument("--prem_mem_dim", type=int, default=128)
-    parser.add_argument("--prem_layer_groups", type=int, default=1)
+    parser.add_argument("--prem_layer_groups", type=int, default=4)
     parser.add_argument("--stream_chunk_tokens", type=int, default=32)
     parser.add_argument(
         "--visual_buffer_frames",

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 
-# Shared defaults for the temporal-mean, multi-slot PReM experiments.
+# Shared defaults for PReM training / evaluation launchers (main paper recipe).
 
 PREM_REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "${PREM_REPO_ROOT}"
@@ -10,27 +10,28 @@ MAIN_OUTPUT_ROOT="${MAIN_OUTPUT_ROOT:-outputs/prem_attention_kv}"
 ANALYSIS_OUTPUT_ROOT="${ANALYSIS_OUTPUT_ROOT:-outputs/model_analysis}"
 DATASETS="${DATASETS:-egoschema,mlvu,longvideobench,videomme,mvbench,lvbench}"
 VIDEO_ROOT="${VIDEO_ROOT:-data/llava-video-178k/frames}"
-# Writer temporal cap is independent of decoder budget B. Train and eval share it.
-TRAIN_MAX_FRAMES="${TRAIN_MAX_FRAMES:-240}"
-EVAL_MAX_FRAMES="${EVAL_MAX_FRAMES:-${TRAIN_MAX_FRAMES}}"
+# Writer temporal cap is independent of decoder budget B.
+# Training uses T=64; evaluation ingestion uses T=240 unless overridden.
+TRAIN_MAX_FRAMES="${TRAIN_MAX_FRAMES:-64}"
+EVAL_MAX_FRAMES="${EVAL_MAX_FRAMES:-240}"
 VISUAL_BUFFER_FRAMES="${VISUAL_BUFFER_FRAMES:-16}"
 EPOCHS="${EPOCHS:-1}"
 FORCE="${FORCE:-0}"
 PREM_DRY_RUN="${PREM_DRY_RUN:-0}"
 
 prem_pin_table2_recipe() {
-  # Lockstep with scripts/run_prem_kv_qwen25_3b.sh. Call after sourcing this file.
-  TRAIN_MAX_FRAMES="${TRAIN_MAX_FRAMES:-240}"
-  EVAL_MAX_FRAMES="${EVAL_MAX_FRAMES:-${TRAIN_MAX_FRAMES}}"
+  # Lockstep with scripts/run_prem_kv_qwen25_3b.sh (main paper recipe). Call after sourcing this file.
+  TRAIN_MAX_FRAMES="${TRAIN_MAX_FRAMES:-64}"
+  EVAL_MAX_FRAMES="${EVAL_MAX_FRAMES:-240}"
   EPOCHS="${EPOCHS:-1}"
   PREM_TRAIN_ALPHA="${PREM_TRAIN_ALPHA:-0.75}"
   PREM_PRED_WEIGHT="${PREM_PRED_WEIGHT:-0.2}"
   PREM_PRED_TOKENS="${PREM_PRED_TOKENS:-4}"
   PREM_ROUTER_GAMMA="${PREM_ROUTER_GAMMA:-0.10}"
   PREM_LAYER_GROUPS="${PREM_LAYER_GROUPS:-4}"
-  QWEN25_NUM_SLOTS="${QWEN25_NUM_SLOTS:-1}"
+  QWEN25_NUM_SLOTS="${QWEN25_NUM_SLOTS:-4}"
   QWEN25_LR="${QWEN25_LR:-2e-4}"
-  QWEN25_EVAL_ALPHA="${QWEN25_EVAL_ALPHA:-0.5}"
+  QWEN25_EVAL_ALPHA="${QWEN25_EVAL_ALPHA:-0.75}"
   QWEN25_MODEL_PATH="${QWEN25_MODEL_PATH:-ckpt/Qwen2.5-VL-3B-Instruct}"
   QWEN25_DATA_FILE="${QWEN25_DATA_FILE:-data/llava-video-178k/trainset_9k.jsonl}"
   DATASETS="${DATASETS:-egoschema,mlvu,longvideobench,videomme,mvbench,lvbench}"
@@ -73,8 +74,8 @@ prem_configure_backbone() {
       PREM_MODEL_PATH="${QWEN25_MODEL_PATH:-ckpt/Qwen2.5-VL-3B-Instruct}"
       PREM_DATA_FILE="${QWEN25_DATA_FILE:-data/llava-video-178k/trainset_9k.jsonl}"
       PREM_TRAIN_LR="${QWEN25_LR:-2e-4}"
-      PREM_EVAL_ALPHA="${QWEN25_EVAL_ALPHA:-0.5}"
-      PREM_NUM_SLOTS="${QWEN25_NUM_SLOTS:-1}"
+      PREM_EVAL_ALPHA="${QWEN25_EVAL_ALPHA:-0.75}"
+      PREM_NUM_SLOTS="${QWEN25_NUM_SLOTS:-4}"
       ckpt_stem="qwen25_3b_b${budget}"
       ;;
     qwen3)
@@ -84,7 +85,7 @@ prem_configure_backbone() {
       PREM_MODEL_PATH="${QWEN3_MODEL_PATH:-ckpt/Qwen3-VL-8B-Instruct}"
       PREM_DATA_FILE="${QWEN3_DATA_FILE:-data/llava-video-178k/trainset_9k.jsonl}"
       PREM_TRAIN_LR="${QWEN3_LR:-1e-4}"
-      PREM_EVAL_ALPHA="${QWEN3_EVAL_ALPHA:-0.5}"
+      PREM_EVAL_ALPHA="${QWEN3_EVAL_ALPHA:-0.75}"
       PREM_NUM_SLOTS="${QWEN3_NUM_SLOTS:-4}"
       ckpt_stem="qwen3_8b_b${budget}"
       ;;
